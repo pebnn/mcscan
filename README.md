@@ -35,7 +35,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
    pip install -r requirements.txt
    ```
 
-4. **Optional: GeoLite2 Country database**
+4. **Optional: GeoLite2 Country database (To display server location)**
    ```bash
    # requires a free MaxMind license key
    export MM_LICENSE_KEY=YOUR_KEY
@@ -115,16 +115,11 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
    pip install -r requirements.txt
    ```
 
-3. **Create project folders**
-   ```powershell
-   New-Item -ItemType Directory -Force .\instance, .\static\server_icons | Out-Null
-   ```
-
-4. **Install Npcap (packet capture driver)**
+3. **Install Npcap (packet capture driver)**
    - Download and install Npcap. During setup, select **“Install Npcap in WinPcap API-compatible Mode.”**
    - Reboot if prompted.
 
-5. **Build Masscan**
+4. **Build Masscan**
    - Option A (Visual Studio):
      ```powershell
      git clone https://github.com/robertdavidgraham/masscan.git
@@ -141,14 +136,14 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
      # binary: .\bin\masscan.exe
      ```
 
-6. **Add Masscan to PATH**
+5. **Add Masscan to PATH**
    ```powershell
    # assuming you copied masscan.exe to C:\Tools\masscan
    setx PATH "$env:PATH;C:\Tools\masscan"
    # open a NEW terminal for PATH changes to apply
    ```
 
-7. **Optional: GeoLite2 Country database**
+6. **Optional: GeoLite2 Country database (To display server location)**
    ```powershell
    # requires a free MaxMind license key
    $env:MM_LICENSE_KEY="YOUR_KEY"
@@ -157,7 +152,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
    Get-ChildItem -Recurse -Filter GeoLite2-Country.mmdb | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName .\GeoLite2-Country.mmdb -Force }
    ```
 
-8. **Run the scanner**  *(PowerShell as Administrator recommended)*
+7. **Run the scanner**  *(PowerShell as Administrator recommended)*
    ```powershell
    cd <path-to>\mcscan
    .\.venv\Scripts\Activate.ps1
@@ -178,7 +173,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
   - `--threads <int>`  
     Worker threads for Minecraft status verification. Defaults to the script’s internal setting; you usually don’t need to set this.
 
-9. **Run the web UI**
+8. **Run the web UI**
    ```powershell
    cd <path-to>\mcscan
    .\.venv\Scripts\Activate.ps1

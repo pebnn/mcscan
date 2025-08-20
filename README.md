@@ -177,7 +177,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
   - `--ports <str>`  
     Comma-separated ports and/or ranges, e.g. `25565,25566-25570,1-65535`. If omitted, uses the script’s built-in common ports.
   - `--random[=<seed>]`  
-    Use Masscan’s randomization seed. With no value, the script auto-picks a seed; with a value, it passes that integer to Masscan’s `--seed`. Different seeds change probe order.{index=7}
+    Use Masscan’s randomization seed. With no value, the script auto-picks a seed; with a value, it passes that integer to Masscan’s `--seed`. Different seeds change probe order.
   - `--resume <paused.conf>`  
     Resume a previously paused Masscan run (created when Masscan exits with a saved state).
   - `--threads <int>`  

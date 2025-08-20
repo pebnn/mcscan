@@ -56,7 +56,6 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
    **A) Already root**  
    Activate the venv and run normally.
    ```bash
-   sudo -i
    cd /path/to/mcscan
    source .venv/bin/activate
    python3 mcscan.py --rate 50000 --ports 25565

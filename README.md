@@ -180,7 +180,6 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
 python app.py
 # defaults to http://localhost:5000
 ```
-On first run the app creates required folders and its SQLite database.
 
 ## UI overview
 - **Table columns:** Icon, IP:Port, Whitelist, MOTD, Version, Players, Country, Date Added, Actions, Reachable.

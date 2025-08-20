@@ -35,12 +35,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
    pip install -r requirements.txt
    ```
 
-4. **Project folders**
-   ```bash
-   mkdir -p instance static/server_icons
-   ```
-
-5. **Optional: GeoLite2 Country database**
+4. **Optional: GeoLite2 Country database**
    ```bash
    # requires a free MaxMind license key
    export MM_LICENSE_KEY=YOUR_KEY
@@ -49,7 +44,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
    find . -name 'GeoLite2-Country.mmdb' -exec cp {} ./GeoLite2-Country.mmdb \;
    ```
 
-6. **Run the scanner**
+5. **Run the scanner**
 
    Masscan needs raw-socket privileges. Pick one:
 
@@ -94,7 +89,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
     >sudo apt update && sudo apt install -y libpcap0.8 libpcap-dev
     >```
 
-7. **Run the web UI**
+6. **Run the web UI**
    ```bash
    source .venv/bin/activate
    python3 app.py

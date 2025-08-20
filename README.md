@@ -56,7 +56,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
    ```
 
   - `--rate` is packets per second sent by Masscan. Masscan’s default is **100 pps** if you omit it. Pick a rate your link and ISP can safely handle. Start low (e.g., 10k-40k pps) and increase cautiously. On Linux bare metal ~1.6M pps is possible;   Windows/VMs ~300k pps.
-  - `--ports` accepts a single port, a range, or a comma-list of both, e.g. `25565`, `25560-25570`, or `25565,25566-25570,1-65535`. If you omit `--ports`, the script uses port 25565 by default.
+  - `--ports` accepts a single port, a range, or a comma-list of both, e.g. `25565`, `25560-25570`, or `25565,25566-25570,1-65535`. If you omit `--ports`, the script uses port `25565` by default.
 
   **All options**
   - `--rate, -r <int>`  

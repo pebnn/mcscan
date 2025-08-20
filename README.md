@@ -14,7 +14,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
 > If you do not agree, **do not use** this software.
 
 # Installation (Linux)
-
+`mcscan.py` handles server scanning and `app.py` handles the webui (viewing the scanned servers).
 1. **System packages**
    ```bash
    sudo apt update
@@ -85,7 +85,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
 
    
 # Installation (Windows)
-
+`mcscan.py` handles server scanning and `app.py` handles the webui (viewing the scanned servers).
 > Requires Python 3.10+, Git, and admin rights for packet capture.
 
 1. **Clone**

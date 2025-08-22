@@ -1,3 +1,13 @@
+> [!IMPORTANT]
+> **Disclaimer of Warranty and Liability**  
+> This software is provided "as is" for educational and research use. **No warranty** of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose, and non-infringement.  
+>
+> By using this software, **you accept full responsibility** for all actions and outcomes. The authors and contributors **are not liable** for any direct, indirect, incidental, special, exemplary, or consequential damages, including loss of data, service disruption, account bans, or legal claims, arising from use or misuse of this project.  
+>
+> **Not legal advice.** Ensure your usage complies with all applicable laws, contracts, ISP/AUP terms, and third-party policies. Use only against assets you own or have **explicit written permission** to test.  
+>
+> If you do not agree, **do not use** this software.
+
 # Minecraft Server Scanner
 A fast Minecraft java server scanner written in Python, with Masscan at it's core. Includes loads of useful features to filter and search through thousands of servers in an easy to use web interface.
 
@@ -14,16 +24,6 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
 - Rich server details: MOTD, players, icon, version
 - Automatic country tagging for each server
 - CLI view with live scanning progress
-
-> [!IMPORTANT]
-> **Disclaimer of Warranty and Liability**  
-> This software is provided "as is" for educational and research use. **No warranty** of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose, and non-infringement.  
->
-> By using this software, **you accept full responsibility** for all actions and outcomes. The authors and contributors **are not liable** for any direct, indirect, incidental, special, exemplary, or consequential damages, including loss of data, service disruption, account bans, or legal claims, arising from use or misuse of this project.  
->
-> **Not legal advice.** Ensure your usage complies with all applicable laws, contracts, ISP/AUP terms, and third-party policies. Use only against assets you own or have **explicit written permission** to test.  
->
-> If you do not agree, **do not use** this software.
 
 
 # Installation (Linux)

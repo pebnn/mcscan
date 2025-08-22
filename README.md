@@ -3,6 +3,18 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
 
 ![](https://i.imgur.com/FjuFpU9.png)
 
+## Features
+
+- Find live Minecraft servers blazingly fast
+- Fast, clean web dashboard
+- Check whitelist status
+- One-click refresh to keep data current
+- Search, filter, and sort results
+- Star favorites for quick access
+- Rich server details: MOTD, players, icon, version
+- Automatic country tagging for each server
+- CLI view with live scanning progress
+
 > [!IMPORTANT]
 > **Disclaimer of Warranty and Liability**  
 > This software is provided "as is" for educational and research use. **No warranty** of any kind, express or implied, including but not limited to merchantability, fitness for a particular purpose, and non-infringement.  
@@ -12,6 +24,7 @@ A fast Minecraft java server scanner written in Python, with Masscan at it's cor
 > **Not legal advice.** Ensure your usage complies with all applicable laws, contracts, ISP/AUP terms, and third-party policies. Use only against assets you own or have **explicit written permission** to test.  
 >
 > If you do not agree, **do not use** this software.
+
 
 # Installation (Linux)
 `mcscan.py` handles server scanning and `app.py` handles the webui (viewing the scanned servers).

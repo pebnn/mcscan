@@ -1,4 +1,4 @@
-import subprocess
+ are runimport subprocess
 import json
 import threading
 import signal
@@ -26,6 +26,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 DEFAULT_THREADS = 100
 BATCH_SIZE = 50
 FLUSH_INTERVAL_SEC = 10
+MAX_PROCESSED_IPS_CACHE = 100000  # Maximum number of IP:port pairs to keep in memory
 
 DATABASE_PATH = "instance/minecraft_scanner.db"
 MASSCAN_OUTPUT_FILE = "masscan_live_results.json"
@@ -34,10 +35,8 @@ EXCLUDE_FILE = "exclude.conf"
 # Create "static/server_icons" if needed for icon saving
 os.makedirs("static/server_icons", exist_ok=True)
 
-os.makedirs("instance", exist_ok=True)
-
 # Old default ports if user doesn't specify --ports
-COMMON_PORTS = [25565]
+COMMON_PORTS = [25565, 25566, 25567, 25568, 25569, 25564, 25563, 25562, 25604]
 
 log_lock = threading.Lock()
 console = Console()
@@ -161,32 +160,57 @@ def fix_adapter_port_in_paused_conf(paused_file_path):
     with open(paused_file_path, "w") as f:
         f.writelines(new_lines)
 
+def get_output_file_from_paused_conf(paused_file_path):
+    """Extract the output filename from a paused masscan configuration file."""
+    if not os.path.exists(paused_file_path):
+        return MASSCAN_OUTPUT_FILE  # fallback to default
+    
+    try:
+        with open(paused_file_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("output-filename"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        return parts[1].strip()
+                elif line.startswith("output-format"):
+                    # If output-format is specified but no filename, use default
+                    continue
+    except Exception as e:
+        log_message(f"Error reading paused config: {e}", error=True)
+    
+    return MASSCAN_OUTPUT_FILE  # fallback to default
+
 def run_masscan(ports, rate=None, seed=None, target_file="targets.txt", resume_file=None):
-    if os.path.exists(target_file):
-        log_message(f"Using {target_file} as the scan target.")
-        cmd = [
-            "masscan", "-iL", target_file,
-            f"-p{ports}",
-            "-oJ", MASSCAN_OUTPUT_FILE,
-            "--exclude-file", EXCLUDE_FILE
-        ]
-    else:
-        log_message("Target file not found. Scanning entire IPv4 range.")
-        cmd = [
-            "masscan", "0.0.0.0/0",
-            f"-p{ports}",
-            "-oJ", MASSCAN_OUTPUT_FILE,
-            "--exclude-file", EXCLUDE_FILE
-        ]
-    if rate:
-        cmd.extend(["--rate", str(rate)])
-    if seed:
-        cmd.extend(["--seed", str(seed)])
-        log_message(f"Using random seed: {seed}")
     if resume_file:
+        # Resume mode: only use --resume flag, no other parameters
         fix_adapter_port_in_paused_conf(resume_file)
-        cmd.extend(["--resume", resume_file])
-        log_message(f"Resuming Masscan from {resume_file}")
+        cmd = ["masscan", "--resume", resume_file]
+        log_message(f"Resuming Masscan from {resume_file} (resume mode - no additional flags)")
+    else:
+        # Fresh scan mode: build complete command
+        if os.path.exists(target_file):
+            log_message(f"Using {target_file} as the scan target.")
+            cmd = [
+                "masscan", "-iL", target_file,
+                f"-p{ports}",
+                "-oJ", MASSCAN_OUTPUT_FILE,
+                "--exclude-file", EXCLUDE_FILE
+            ]
+        else:
+            log_message("Target file not found. Scanning entire IPv4 range.")
+            cmd = [
+                "masscan", "0.0.0.0/0",
+                f"-p{ports}",
+                "-oJ", MASSCAN_OUTPUT_FILE,
+                "--exclude-file", EXCLUDE_FILE
+            ]
+        if rate:
+            cmd.extend(["--rate", str(rate)])
+        if seed:
+            cmd.extend(["--seed", str(seed)])
+            log_message(f"Using random seed: {seed}")
+    
     try:
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         log_message(f"Masscan started with PID {process.pid} (rate={rate if rate else 'default'})")
@@ -201,11 +225,21 @@ def process_masscan_output(process, live):
     Continuously reads masscan's stderr and updates the dashboard with its output.
     Once masscan produces output, that remains as the latest progress.
     """
+    no_output_count = 0
     while process.poll() is None:
         line = process.stderr.readline().strip()
         if line:
             update_dashboard(live, masscan_progress=line)
-        time.sleep(0.5)
+            no_output_count = 0  # Reset counter when we get output
+        else:
+            no_output_count += 1
+            # Adaptive sleep based on how long we've had no output
+            if no_output_count < 20:
+                time.sleep(1)  # Short sleep for first 20 iterations
+            elif no_output_count < 100:
+                time.sleep(2)  # Medium sleep for next 80 iterations
+            else:
+                time.sleep(5)  # Long sleep after 100 iterations of no output
 
 def parse_motd(motd_obj):
     if hasattr(motd_obj, 'parsed'):
@@ -317,7 +351,7 @@ def check_minecraft_server(ip, port, live):
     finally:
         session.close()
 
-def handle_masscan_line(line, processed_ips, executor, live):
+def handle_masscan_line(line, processed_ips, processed_ips_list, executor, live):
     global mc_ips_checked
     try:
         data = json.loads(line)
@@ -326,35 +360,85 @@ def handle_masscan_line(line, processed_ips, executor, live):
             return
         for port_obj in data.get("ports", []):
             port_number = port_obj["port"]
-            if (ip, port_number) not in processed_ips:
-                processed_ips.add((ip, port_number))
+            ip_port_tuple = (ip, port_number)
+            if ip_port_tuple not in processed_ips:
+                processed_ips.add(ip_port_tuple)
+                processed_ips_list.append(ip_port_tuple)  # Track order for LRU cleanup
                 mc_ips_checked += 1
                 executor.submit(check_minecraft_server, ip, port_number, live)
     except json.JSONDecodeError:
         pass
 
-def process_masscan_results(live, minecraft_threads, process):
+def process_masscan_results(live, minecraft_threads, process, output_file=None):
+    # Use a bounded cache to prevent memory leak
+    # Keep only the last MAX_PROCESSED_IPS_CACHE entries to prevent unlimited growth
+    MAX_CACHE_SIZE = MAX_PROCESSED_IPS_CACHE
     processed_ips = set()
+    processed_ips_list = []  # Keep order for LRU-style cleanup
+    
+    # Use provided output file or fallback to default
+    actual_output_file = output_file if output_file else MASSCAN_OUTPUT_FILE
+    
+    def cleanup_cache():
+        """Remove oldest entries when cache gets too large"""
+        nonlocal processed_ips, processed_ips_list
+        if len(processed_ips) > MAX_CACHE_SIZE:
+            # Remove oldest 20% of entries
+            remove_count = MAX_CACHE_SIZE // 5
+            for _ in range(remove_count):
+                if processed_ips_list:
+                    oldest = processed_ips_list.pop(0)
+                    processed_ips.discard(oldest)
+            log_message(f"Cleaned up {remove_count} old entries from processed_ips cache (now {len(processed_ips)} entries)", error=False, silent=True)
+    
     with ThreadPoolExecutor(max_workers=minecraft_threads) as executor:
         fpos = 0
+        last_file_size = 0
+        no_new_data_count = 0
+        entries_processed = 0
+        
         while True:
             if process.poll() is not None:
-                if os.path.exists(MASSCAN_OUTPUT_FILE):
-                    with open(MASSCAN_OUTPUT_FILE, "r") as f:
+                if os.path.exists(actual_output_file):
+                    with open(actual_output_file, "r") as f:
                         f.seek(fpos)
                         for line in f:
                             fpos += len(line)
-                            handle_masscan_line(line, processed_ips, executor, live)
+                            handle_masscan_line(line, processed_ips, processed_ips_list, executor, live)
                 break
-            if not os.path.exists(MASSCAN_OUTPUT_FILE):
-                time.sleep(1)
+            if not os.path.exists(actual_output_file):
+                time.sleep(2)  # Increased sleep when file doesn't exist
                 continue
-            with open(MASSCAN_OUTPUT_FILE, "r") as f:
-                f.seek(fpos)
-                for line in f:
-                    fpos += len(line)
-                    handle_masscan_line(line, processed_ips, executor, live)
-            time.sleep(0.5)
+                
+            # Check if file has grown (new data available)
+            try:
+                current_size = os.path.getsize(actual_output_file)
+                if current_size > fpos:
+                    # New data available, process it
+                    with open(actual_output_file, "r") as f:
+                        f.seek(fpos)
+                        for line in f:
+                            fpos += len(line)
+                            handle_masscan_line(line, processed_ips, processed_ips_list, executor, live)
+                            entries_processed += 1
+                            
+                            # Periodic cleanup every 10k entries
+                            if entries_processed % 10000 == 0:
+                                cleanup_cache()
+                    
+                    no_new_data_count = 0  # Reset counter
+                else:
+                    # No new data, use adaptive sleep
+                    no_new_data_count += 1
+                    if no_new_data_count < 10:
+                        time.sleep(1)  # Short sleep for first 10 iterations
+                    elif no_new_data_count < 50:
+                        time.sleep(2)  # Medium sleep for next 40 iterations
+                    else:
+                        time.sleep(5)  # Long sleep after 50 iterations of no data
+            except (OSError, IOError):
+                # File might be temporarily unavailable
+                time.sleep(2)
 
 def signal_handler(sig, frame):
     log_message("Interrupt received. Shutting down gracefully...", error=False, silent=False)
@@ -401,14 +485,20 @@ def main():
     if not masscan_proc:
         return
 
-    with Live(create_dashboard(), refresh_per_second=1) as live:
+    # Determine the correct output file for result processing
+    output_file = None
+    if args.resume:
+        output_file = get_output_file_from_paused_conf(args.resume)
+        log_message(f"Using output file from paused config: {output_file}")
+
+    with Live(create_dashboard(), refresh_per_second=0.5) as live:
         # Set the initial message only once (this will be overwritten as soon as masscan produces output)
         update_dashboard(live, masscan_progress="Scanning...")
 
         t1 = threading.Thread(target=process_masscan_output, args=(masscan_proc, live), daemon=True)
         t1.start()
 
-        t2 = threading.Thread(target=process_masscan_results, args=(live, args.threads, masscan_proc), daemon=True)
+        t2 = threading.Thread(target=process_masscan_results, args=(live, args.threads, masscan_proc, output_file), daemon=True)
         t2.start()
 
         masscan_proc.wait()

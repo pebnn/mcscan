@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
 # IntegrityError removed - not used in this module
+from collections import deque
 
 # ==============================
 # CONFIGURATION
@@ -364,6 +365,10 @@ def handle_masscan_line(line, processed_ips, processed_ips_list, executor, live)
             if ip_port_tuple not in processed_ips:
                 processed_ips.add(ip_port_tuple)
                 processed_ips_list.append(ip_port_tuple)  # Track order for LRU cleanup
+                # Immediate trim if cache exceeds bound
+                while len(processed_ips) > MAX_PROCESSED_IPS_CACHE and processed_ips_list:
+                    oldest = processed_ips_list.popleft() if hasattr(processed_ips_list, 'popleft') else processed_ips_list.pop(0)
+                    processed_ips.discard(oldest)
                 mc_ips_checked += 1
                 executor.submit(check_minecraft_server, ip, port_number, live)
     except json.JSONDecodeError:
@@ -374,7 +379,7 @@ def process_masscan_results(live, minecraft_threads, process, output_file=None):
     # Keep only the last MAX_PROCESSED_IPS_CACHE entries to prevent unlimited growth
     MAX_CACHE_SIZE = MAX_PROCESSED_IPS_CACHE
     processed_ips = set()
-    processed_ips_list = []  # Keep order for LRU-style cleanup
+    processed_ips_list = deque()  # Keep order for LRU-style cleanup
     
     # Use provided output file or fallback to default
     actual_output_file = output_file if output_file else MASSCAN_OUTPUT_FILE
@@ -387,13 +392,12 @@ def process_masscan_results(live, minecraft_threads, process, output_file=None):
             remove_count = MAX_CACHE_SIZE // 5
             for _ in range(remove_count):
                 if processed_ips_list:
-                    oldest = processed_ips_list.pop(0)
+                    oldest = processed_ips_list.popleft()
                     processed_ips.discard(oldest)
             log_message(f"Cleaned up {remove_count} old entries from processed_ips cache (now {len(processed_ips)} entries)", error=False, silent=True)
     
     with ThreadPoolExecutor(max_workers=minecraft_threads) as executor:
         fpos = 0
-        last_file_size = 0
         no_new_data_count = 0
         entries_processed = 0
         
@@ -413,6 +417,9 @@ def process_masscan_results(live, minecraft_threads, process, output_file=None):
             # Check if file has grown (new data available)
             try:
                 current_size = os.path.getsize(actual_output_file)
+                # Handle file rotation/truncation
+                if current_size < fpos:
+                    fpos = 0
                 if current_size > fpos:
                     # New data available, process it
                     with open(actual_output_file, "r") as f:
@@ -441,17 +448,24 @@ def process_masscan_results(live, minecraft_threads, process, output_file=None):
                 time.sleep(2)
 
 def signal_handler(sig, frame):
-    log_message("Interrupt received. Shutting down gracefully...", error=False, silent=False)
+    log_message("Interrupt received. Asking Masscan to pause and write paused.conf...", error=False, silent=False)
     shutdown_event.set()
     for process in child_processes:
         if process.poll() is None:
             try:
-                process.terminate()
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+                # Send SIGINT so Masscan writes paused.conf for resume
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    # If it didn't exit, terminate gracefully then force kill if needed
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
             except Exception as e:
-                log_message(f"Error terminating process: {e}", error=True)
+                log_message(f"Error signaling process: {e}", error=True)
     sys.exit(0)
 
 def main():
@@ -484,6 +498,9 @@ def main():
     )
     if not masscan_proc:
         return
+
+    # Hint to user about pause/resume behavior
+    log_message("Press Ctrl-C to pause scan and create 'paused.conf' for resume.", error=False, silent=False)
 
     # Determine the correct output file for result processing
     output_file = None

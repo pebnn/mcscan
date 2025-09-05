@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 import base64
+import re
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -37,7 +38,7 @@ EXCLUDE_FILE = "exclude.conf"
 os.makedirs("static/server_icons", exist_ok=True)
 
 # Old default ports if user doesn't specify --ports
-COMMON_PORTS = [25565, 25566, 25567, 25568, 25569, 25564, 25563, 25562, 25604]
+COMMON_PORTS = [25565, 25566, 25567, 25568, 25569, 25570, 25571, 25572, 25573, 25577]
 
 log_lock = threading.Lock()
 console = Console()
@@ -182,7 +183,7 @@ def get_output_file_from_paused_conf(paused_file_path):
     
     return MASSCAN_OUTPUT_FILE  # fallback to default
 
-def run_masscan(ports, rate=None, seed=None, target_file="targets.txt", resume_file=None):
+def run_masscan(ports, rate=None, seed=None, targets=None, resume_file=None):
     if resume_file:
         # Resume mode: only use --resume flag, no other parameters
         fix_adapter_port_in_paused_conf(resume_file)
@@ -190,22 +191,79 @@ def run_masscan(ports, rate=None, seed=None, target_file="targets.txt", resume_f
         log_message(f"Resuming Masscan from {resume_file} (resume mode - no additional flags)")
     else:
         # Fresh scan mode: build complete command
-        if os.path.exists(target_file):
-            log_message(f"Using {target_file} as the scan target.")
-            cmd = [
-                "masscan", "-iL", target_file,
-                f"-p{ports}",
-                "-oJ", MASSCAN_OUTPUT_FILE,
-                "--exclude-file", EXCLUDE_FILE
-            ]
+        cmd = [
+            "masscan",
+            f"-p{ports}",
+            "-oJ", MASSCAN_OUTPUT_FILE,
+            "--exclude-file", EXCLUDE_FILE
+        ]
+
+        # Determine targets source:
+        # - If explicit --targets provided it may be a list of file paths and/or inline items
+        # - Else default to 'targets.txt' if exists, otherwise scan 0.0.0.0/0
+        if targets:
+            # Normalize to list
+            if isinstance(targets, str):
+                tokens = [targets]
+            else:
+                tokens = list(targets)
+
+            files = []
+            inline_targets = []
+            for token in tokens:
+                # If token is a path to a file, treat as file; otherwise treat as inline targets (may contain commas/spaces)
+                if os.path.exists(token):
+                    files.append(token)
+                else:
+                    inline_targets.extend([t for t in re.split(r"[\s,]+", token.strip()) if t])
+
+            if len(files) == 1 and not inline_targets:
+                # Single file only
+                log_message(f"Using targets file: {files[0]}")
+                cmd = ["masscan", "-iL", files[0], f"-p{ports}", "-oJ", MASSCAN_OUTPUT_FILE, "--exclude-file", EXCLUDE_FILE]
+            elif files or inline_targets:
+                # Combine multiple sources into a single temporary file
+                combined_path = f"targets_combined_{int(time.time())}.txt"
+                try:
+                    with open(combined_path, "w") as out_f:
+                        for fpath in files:
+                            try:
+                                with open(fpath, "r") as in_f:
+                                    for line in in_f:
+                                        line = line.strip()
+                                        if line:
+                                            out_f.write(line + "\n")
+                            except Exception as ex:
+                                log_message(f"Failed to read targets file {fpath}: {ex}", error=True)
+                        for tgt in inline_targets:
+                            out_f.write(tgt + "\n")
+                    log_message(f"Using combined targets file: {combined_path} (files={len(files)}, inline={len(inline_targets)})")
+                    cmd = ["masscan", "-iL", combined_path, f"-p{ports}", "-oJ", MASSCAN_OUTPUT_FILE, "--exclude-file", EXCLUDE_FILE]
+                except Exception as ex:
+                    log_message(f"Failed to create combined targets file: {ex}", error=True)
+                    # Fallback: if we at least have inline targets, pass them inline
+                    if inline_targets:
+                        cmd.extend(inline_targets)
+                    else:
+                        # As a last resort, default to 0.0.0.0/0
+                        cmd.append("0.0.0.0/0")
+            else:
+                # No valid tokens after parsing; fallback to defaults
+                default_file = "targets.txt"
+                if os.path.exists(default_file):
+                    log_message(f"Using {default_file} as the scan target.")
+                    cmd = ["masscan", "-iL", default_file, f"-p{ports}", "-oJ", MASSCAN_OUTPUT_FILE, "--exclude-file", EXCLUDE_FILE]
+                else:
+                    log_message("Target file not found. Scanning entire IPv4 range.")
+                    cmd.append("0.0.0.0/0")
         else:
-            log_message("Target file not found. Scanning entire IPv4 range.")
-            cmd = [
-                "masscan", "0.0.0.0/0",
-                f"-p{ports}",
-                "-oJ", MASSCAN_OUTPUT_FILE,
-                "--exclude-file", EXCLUDE_FILE
-            ]
+            default_file = "targets.txt"
+            if os.path.exists(default_file):
+                log_message(f"Using {default_file} as the scan target.")
+                cmd = ["masscan", "-iL", default_file, f"-p{ports}", "-oJ", MASSCAN_OUTPUT_FILE, "--exclude-file", EXCLUDE_FILE]
+            else:
+                log_message("Target file not found. Scanning entire IPv4 range.")
+                cmd.append("0.0.0.0/0")
         if rate:
             cmd.extend(["--rate", str(rate)])
         if seed:
@@ -476,6 +534,8 @@ def main():
                         help=f"Threads for MC scanning (default: {DEFAULT_THREADS}).")
     parser.add_argument("--rate", "-r", type=int, help="Packet rate for Masscan (optional).")
     parser.add_argument("--resume", type=str, help="Resume from paused file (optional).")
+    parser.add_argument("--targets", nargs='*',
+                        help="One or more target files and/or inline IPs/CIDRs. Inline entries can be comma/space-separated. Examples: --targets targetsNO.txt targetsSE.txt OR --targets '1.2.3.0/24, 8.8.8.8' '10.0.0.0/8'")
     parser.add_argument("--ports", type=str,
                         help="Comma-separated ports or port-ranges (e.g. '25565,27015-27020,1-65535'). "
                              "If omitted, uses the built-in COMMON_PORTS list.")
@@ -493,14 +553,14 @@ def main():
         ports=ports_arg,
         rate=args.rate,
         seed=args.random,
-        target_file="targets.txt",
+        targets=args.targets,
         resume_file=args.resume
     )
     if not masscan_proc:
         return
 
-    # Hint to user about pause/resume behavior
-    log_message("Press Ctrl-C to pause scan and create 'paused.conf' for resume.", error=False, silent=False)
+    # Hint to user about pause/resume behavior (log file only to avoid Live interference)
+    log_message("Press Ctrl-C to pause scan and create 'paused.conf' for resume.", error=False, silent=True)
 
     # Determine the correct output file for result processing
     output_file = None
@@ -508,7 +568,7 @@ def main():
         output_file = get_output_file_from_paused_conf(args.resume)
         log_message(f"Using output file from paused config: {output_file}")
 
-    with Live(create_dashboard(), refresh_per_second=0.5) as live:
+    with Live(create_dashboard(), refresh_per_second=0.5, console=console) as live:
         # Set the initial message only once (this will be overwritten as soon as masscan produces output)
         update_dashboard(live, masscan_progress="Scanning...")
 

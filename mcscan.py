@@ -392,7 +392,8 @@ def check_minecraft_server(ip, port, live):
         protocol_errors = [
             "invalid minecraft server response", "no version info",
             "connection closed", "invalid packet", "bad packet",
-            "received invalid status response packet"
+            "received invalid status response packet",
+            "invalid json", "not enough data to read"
         ]
         
         # Determine if error should be silent based on type

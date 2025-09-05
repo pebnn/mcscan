@@ -311,6 +311,7 @@
             </button>
             <button id="sticky-check-page-wl-btn" class="btn btn-info" title="Check whitelist for entire page">
               <i class="fas fa-user-check"></i>
+              <span class="ml-1 d-none d-md-inline">Check Whitelist</span>
             </button>
             <button id="sticky-refresh-config-btn" class="btn btn-secondary">
               <i class="fas fa-cog"></i>
@@ -382,6 +383,7 @@
           </button>
           <button id="check-page-wl-btn" class="btn btn-info ml-2" title="Check whitelist for entire page">
             <i class="fas fa-user-check"></i>
+            <span class="ml-1">Check Whitelist</span>
           </button>
           <button id="refresh-config-btn" class="btn btn-secondary ml-2">
             <i class="fas fa-cog"></i>
@@ -1683,9 +1685,18 @@
           showNotification("Failed to copy text.");
         });
     });
-    // Handle Search button click: redirect with search query (resetting page to 1)
+    // Handle Search button click: if in favorites view, filter client-side; else navigate
     $('#search-btn').on('click', function(){
-      var searchTerm = $('#search').val();
+      var searchTerm = $('#search').val().toLowerCase();
+      if (showFavoritesOnly) {
+        // Client-side filter rows in favorites view
+        $('#server-list tr').each(function() {
+          var row = $(this);
+          var text = row.text().toLowerCase();
+          row.toggle(text.indexOf(searchTerm) !== -1);
+        });
+        return;
+      }
       var currentPerPage = $('#per-page-select').val();
       window.location.href = window.location.pathname + "?search=" + encodeURIComponent(searchTerm) + "&page=1&per_page=" + currentPerPage;
     });
@@ -1693,9 +1704,7 @@
     // Handle Enter key press in search input
     $('#search').on('keypress', function(e){
       if (e.which === 13) { // Enter key
-        var searchTerm = $('#search').val();
-        var currentPerPage = $('#per-page-select').val();
-        window.location.href = window.location.pathname + "?search=" + encodeURIComponent(searchTerm) + "&page=1&per_page=" + currentPerPage;
+        $('#search-btn').click();
       }
     });
     // Handle per-page dropdown change
@@ -1706,9 +1715,41 @@
       currentUrl.searchParams.set('page', 1);
       window.location.href = currentUrl.toString();
     });
-    // Sorting: Clicking a header toggles sorting parameters in the URL
+    // Sorting: if in favorites view, sort client-side; else navigate with params
     $('.sort-header').on('click', function(){
       var sortBy = $(this).data('sort-by');
+      if (showFavoritesOnly) {
+        var rows = $('#server-list tr').get();
+        var ascending = !$(this).data('sorted-asc');
+        $(this).data('sorted-asc', ascending);
+        rows.sort(function(a, b){
+          function getCell(row, key){
+            var $row = $(row);
+            switch(key){
+              case 'ip': return $row.find('.ip-text').text();
+              case 'motd': return $row.find('td').eq(3).text();
+              case 'version': return $row.find('td').eq(4).text();
+              case 'players': return parseInt($row.find('.players-number').text() || '0', 10);
+              case 'country': return $row.find('td').eq(6).text();
+              case 'date_added': return $row.find('td').eq(7).text();
+              case 'reachable': return $row.find('td').eq(9).find('.text-success').length ? 1 : 0;
+              default: return $row.text();
+            }
+          }
+          var av = getCell(a, sortBy);
+          var bv = getCell(b, sortBy);
+          if ($.isNumeric(av) && $.isNumeric(bv)){
+            return ascending ? (av - bv) : (bv - av);
+          }
+          av = (av||'').toString().toLowerCase();
+          bv = (bv||'').toString().toLowerCase();
+          if (av < bv) return ascending ? -1 : 1;
+          if (av > bv) return ascending ? 1 : -1;
+          return 0;
+        });
+        $.each(rows, function(_, row){ $('#server-list').append(row); });
+        return;
+      }
       var currentUrl = new URL(window.location.href);
       var currentSortBy = currentUrl.searchParams.get('sort_by') || 'id';
       var currentSortOrder = currentUrl.searchParams.get('sort_order') || 'asc';
@@ -1927,3 +1968,4 @@
    </script>
 </body>
 </html>
+

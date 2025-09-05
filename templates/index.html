@@ -737,6 +737,52 @@
     function setFavorites(favs) {
       localStorage.setItem("favorites", JSON.stringify(favs));
     }
+    
+    // Use localStorage to persist whitelist status; key: "whitelistStatus"
+    function getWhitelistStatus() {
+      let status = localStorage.getItem("whitelistStatus");
+      return status ? JSON.parse(status) : {};
+    }
+    function setWhitelistStatus(serverId, statusData) {
+      let status = getWhitelistStatus();
+      status[serverId] = {
+        ...statusData,
+        timestamp: Date.now()
+      };
+      // Clean up old entries (older than 24 hours) to prevent excessive storage
+      let cutoff = Date.now() - (24 * 60 * 60 * 1000);
+      Object.keys(status).forEach(id => {
+        if (status[id].timestamp < cutoff) {
+          delete status[id];
+        }
+      });
+      localStorage.setItem("whitelistStatus", JSON.stringify(status));
+    }
+    function getWhitelistStatusForServer(serverId) {
+      let status = getWhitelistStatus();
+      return status[serverId] || null;
+    }
+    
+    // Restore whitelist status from localStorage for all visible servers
+    function restoreWhitelistStatus() {
+      $('tr[data-server-id]').each(function() {
+        let row = $(this);
+        let serverId = row.data('server-id');
+        let statusData = getWhitelistStatusForServer(serverId);
+        
+        if (statusData) {
+          let statusEl = row.find('.wl-status');
+          let statusText = statusData.statusText || '';
+          let statusColor = statusData.statusColor || '#6c757d';
+          let tooltipText = statusData.tooltipText || statusText;
+          
+          statusEl.text(statusText).css('color', statusColor);
+          if (tooltipText) {
+            statusEl.attr('title', tooltipText);
+          }
+        }
+      });
+    }
     // Update favorite button appearance based on status
     function updateFavoriteButton(btn, isFav) {
       let icon = $(btn).find('i');
@@ -822,6 +868,7 @@
           $("#pagination-nav").hide();  // Hide pagination in favorites view.
           $("#pagination-nav-top").hide();  // Hide top pagination in favorites view.
           $("#sticky-pagination").hide();  // Hide sticky pagination in favorites view.
+          restoreWhitelistStatus(); // Restore whitelist status from localStorage
           bindRowEvents();
         },
         error: function(){
@@ -850,6 +897,7 @@
         let id = $(this).data('id');
         updateFavoriteButton(this, favs.indexOf(id) !== -1);
       });
+      restoreWhitelistStatus(); // Restore whitelist status from localStorage
       bindRowEvents();
     });
     // Refresh All function: if in favorites view, refresh only favorites.
@@ -1296,6 +1344,18 @@
             if (res.used_known_version) { tooltipText += '\nUsed known server version for instant detection'; }
             if (res.versions_tried && res.versions_tried.length > 1) { tooltipText += '\nVersions tried: ' + res.versions_tried.join(', '); }
             statusEl.text(statusText).css('color', statusColor).attr('title', tooltipText);
+            
+            // Save whitelist status to localStorage
+            setWhitelistStatus(serverId, {
+              statusText: statusText,
+              statusColor: statusColor,
+              tooltipText: tooltipText,
+              status: res.status,
+              protocol_version: res.protocol_version,
+              version_name: res.version_name,
+              used_known_version: res.used_known_version,
+              versions_tried: res.versions_tried
+            });
           } else {
             statusEl.text('Unknown').css('color', '#6c757d');
           }
@@ -1492,6 +1552,18 @@
                 }
                 
                 statusEl.text(statusText).css('color', statusColor).attr('title', tooltipText);
+                
+                // Save whitelist status to localStorage
+                setWhitelistStatus(serverId, {
+                  statusText: statusText,
+                  statusColor: statusColor,
+                  tooltipText: tooltipText,
+                  status: res.status,
+                  protocol_version: res.protocol_version,
+                  version_name: res.version_name,
+                  used_known_version: res.used_known_version,
+                  versions_tried: res.versions_tried
+                });
               } else {
                 statusEl.text('Unknown').css('color', '#6c757d');
               }
@@ -1855,4 +1927,3 @@
    </script>
 </body>
 </html>
-

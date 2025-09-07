@@ -9,8 +9,6 @@ import hashlib
 import zlib
 import os
 import time
-import threading
-import random
 try:
 	from Crypto.Cipher import AES, PKCS1_v1_5
 	from Crypto.PublicKey import RSA
@@ -94,67 +92,11 @@ REMOTE_PROTOCOL_URLS = [
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "instance")
 os.makedirs(CACHE_DIR, exist_ok=True)
 CACHE_PATH = os.path.join(CACHE_DIR, "protocol_cache.json")
-MIN_PROTOCOL = 47  # include 1.8.x and newer
+MIN_PROTOCOL = 335  # don't auto-add very old protocols
 
 AUTO_UPDATE = os.environ.get("PROTOCOL_AUTO_UPDATE", "1") not in ("0", "false", "False")
 CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 
-# ===============================
-# Global join-rate limiter
-# ===============================
-class _TokenBucket:
-	def __init__(self, rate_per_sec: float, burst: int):
-		self.rate = max(0.01, float(rate_per_sec))
-		self.capacity = max(1.0, float(burst))
-		self.tokens = self.capacity
-		self.t_last = time.monotonic()
-		self.lock = threading.Lock()
-
-	def acquire(self) -> None:
-		while True:
-			with self.lock:
-				now = time.monotonic()
-				elapsed = now - self.t_last
-				self.t_last = now
-				self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-				if self.tokens >= 1.0:
-					self.tokens -= 1.0
-					return
-				needed = 1.0 - self.tokens
-				wait = needed / self.rate
-			# sleep outside lock
-			time.sleep(wait)
-
-JOIN_RPS = float(os.environ.get("JOIN_RPS", "1.0"))            # tokens added per second
-JOIN_BURST = int(os.environ.get("JOIN_BURST", "2"))            # max tokens
-JOIN_MAX_RETRIES = int(os.environ.get("JOIN_MAX_RETRIES", "3"))# retries on 429 per payload
-JOIN_BACKOFF_BASE = float(os.environ.get("JOIN_BACKOFF_BASE", "0.75"))  # seconds
-JOIN_BACKOFF_MAX = float(os.environ.get("JOIN_BACKOFF_MAX", "30"))      # cap
-_JOIN_BUCKET = _TokenBucket(JOIN_RPS, JOIN_BURST)
-
-def _acquire_join_token() -> None:
-	_JOIN_BUCKET.acquire()
-
-def _sleep_backoff(attempt: int, retry_after_hdr: Optional[str]) -> None:
-	# Honor Retry-After if present. Seconds or HTTP date. If parse fails, use expo backoff with jitter.
-	delay = None
-	if retry_after_hdr:
-		try:
-			# Try seconds
-			delay = float(retry_after_hdr)
-		except Exception:
-			# Try HTTP-date
-			try:
-				from email.utils import parsedate_to_datetime
-				dt = parsedate_to_datetime(retry_after_hdr)
-				delay = max(0.0, (dt - datetime.now(dt.tzinfo)).total_seconds())
-			except Exception:
-				delay = None
-	if delay is None:
-		# Exponential backoff with jitter [0.5, 1.5]x
-		exp = min(JOIN_BACKOFF_MAX, JOIN_BACKOFF_BASE * (2.0 ** attempt))
-		delay = exp * (0.5 + random.random())
-	time.sleep(delay)
 
 def _load_cache() -> Optional[dict]:
 	try:
@@ -331,6 +273,7 @@ class MinecraftProtocolClient:
         self._compression_threshold = None
         self._server_pubkey = None
         self._server_id = ""
+        self._force_legacy_login_start = False
         
     def _pack_varint(self, value: int) -> bytes:
         """Pack an integer as a VarInt."""
@@ -408,57 +351,34 @@ class MinecraftProtocolClient:
         import requests
         uuid_nodash = uuid_str.replace('-', '').lower()
         uuid_dashed = str(uuid.UUID(uuid_nodash))
-        headers = {"Content-Type": "application/json", "User-Agent": "mcscan/whitelist-probe"}
-        url = "https://sessionserver.mojang.com/session/minecraft/join"
+        headers = {"Content-Type": "application/json"}
 
-        def _post_with_backoff(payload: dict) -> tuple[bool, int, str]:
-            last_code, last_text = -1, ""
-            for attempt in range(JOIN_MAX_RETRIES + 1):
-                _acquire_join_token()
-                try:
-                    r = requests.post(url, json=payload, headers=headers, timeout=10)
-                except Exception as e:
-                    # Network error: treat as transient only on early attempts
-                    last_code, last_text = -1, f"network_error: {e}"
-                    if attempt < JOIN_MAX_RETRIES:
-                        _sleep_backoff(attempt, None)
-                        continue
-                    return False, last_code, last_text
+        def try_join(url_base: str) -> tuple[bool, int, str]:
+            url = f"{url_base}/session/minecraft/join"
+            # 1) nodash
+            payload = {"accessToken": access_token, "selectedProfile": uuid_nodash, "serverId": server_hash}
+            r = requests.post(url, json=payload, headers=headers, timeout=10)
+            if r.status_code == 204:
+                return True, 204, ""
+            self.logger.warning(f"Session join failed via {url} (nodash): {r.status_code} {r.text}")
+            # 2) dashed
+            payload = {"accessToken": access_token, "selectedProfile": uuid_dashed, "serverId": server_hash}
+            r2 = requests.post(url, json=payload, headers=headers, timeout=10)
+            if r2.status_code == 204:
+                return True, 204, ""
+            self.logger.warning(f"Session join failed via {url} (dashed): {r2.status_code} {r2.text}")
+            return False, r2.status_code, r2.text
 
-                if r.status_code == 204:
-                    return True, 204, ""
-                if r.status_code == 429:
-                    # Honor Retry-After if present, then retry
-                    retry_after = r.headers.get("Retry-After")
-                    self.logger.warning(f"Session join 429. Retry-After={retry_after!r}. attempt={attempt}")
-                    if attempt < JOIN_MAX_RETRIES:
-                        _sleep_backoff(attempt, retry_after)
-                        continue
-                    return False, 429, "rate_limited"
-                # Other codes: do not spin forever
-                last_code, last_text = r.status_code, r.text
-                break
-            return False, last_code, last_text
-
-        # 1) Try nodash
-        payload = {"accessToken": access_token, "selectedProfile": uuid_nodash, "serverId": server_hash}
-        ok, code, text = _post_with_backoff(payload)
+        # Prefer the modern services API first
+        ok, code, text = try_join("https://api.minecraftservices.com")
         if ok:
-            return True, 204, ""
-        self.logger.warning(f"Session join failed via {url} (nodash): {code} {text}")
-        if code == 429:
-            return False, 429, text  # definitive for caller
-
-        # 2) Try dashed
-        payload = {"accessToken": access_token, "selectedProfile": uuid_dashed, "serverId": server_hash}
-        ok2, code2, text2 = _post_with_backoff(payload)
-        if ok2:
-            return True, 204, ""
-        self.logger.warning(f"Session join failed via {url} (dashed): {code2} {text2}")
-        return False, code2, text2
+            return True, code, text
+        # Fallback to legacy Mojang endpoint
+        ok2, code2, text2 = try_join("https://sessionserver.mojang.com")
+        return (ok2, code2, text2)
 
     def _compute_server_hash(self, server_id: str, public_key_der: bytes, shared_secret: bytes) -> str:
-        # Java-style signed hash hex (two's complement)
+        # Java-style signed hash hex (two's complement) per wiki.vg
         digest = hashlib.sha1()
         digest.update(server_id.encode('ISO-8859-1'))
         digest.update(shared_secret)
@@ -478,13 +398,29 @@ class MinecraftProtocolClient:
         if not self.socket:
             raise ProtocolError("Socket not connected")
             
-        # Packet = VarInt(packet_id) + data
+        # Packet payload = VarInt(packet_id) + data
         payload = self._pack_varint(packet_id) + data
         
+        # Apply compression wrapper if enabled
         if self._compression_threshold is not None:
-            # No compression for small payloads in login; keep uncompressed
-            pass
-        frame = self._pack_varint(len(payload)) + payload
+            threshold = self._compression_threshold or 0
+            if threshold > 0 and len(payload) >= threshold:
+                # compress
+                try:
+                    compressed = zlib.compress(payload)
+                except Exception as e:
+                    raise ProtocolError(f"Failed to compress packet: {e}")
+                # VarInt of uncompressed length, then compressed bytes
+                inner = self._pack_varint(len(payload)) + compressed
+            else:
+                # Uncompressed: VarInt 0 + raw payload
+                inner = self._pack_varint(0) + payload
+            frame_body = inner
+        else:
+            frame_body = payload
+        
+        # Frame = VarInt(length of frame_body) + frame_body
+        frame = self._pack_varint(len(frame_body)) + frame_body
         if self._cipher_enc:
             frame = self._cipher_enc.encrypt(frame)
         self.socket.sendall(frame)
@@ -578,12 +514,29 @@ class MinecraftProtocolClient:
         self._send_packet(HANDSHAKE_PACKET_ID, data)
     
     def _send_login_start(self, username: str, uuid_str: str) -> None:
-        """Send login start packet: >=1.19 send name+UUID, older send name only."""
-        if self.protocol_version >= 759:
-            data = (
-                self._pack_string(username) +
-                self._pack_uuid(uuid_str)
-            )
+        """Send login start packet: >=1.19 send fields per version; older send name only."""
+        if self.protocol_version >= 764:
+            # 1.20.2+ works with name + UUID (no chat-signing boolean here)
+            if self._force_legacy_login_start:
+                data = (
+                    self._pack_string(username)
+                )
+            else:
+                data = (
+                    self._pack_string(username) +
+                    self._pack_uuid(uuid_str)
+                )
+        elif 759 <= self.protocol_version <= 763:
+            # 1.19.x to 1.20.1 expect name + hasSignature(boolean). We send hasSignature=false
+            if self._force_legacy_login_start:
+                data = (
+                    self._pack_string(username)
+                )
+            else:
+                data = (
+                    self._pack_string(username) +
+                    b'\x00'  # hasSignature = false
+                )
         else:
             data = (
                 self._pack_string(username)
@@ -643,6 +596,8 @@ class MinecraftProtocolClient:
         """
         last_error = None
         versions_tried = []
+        attempted_protocols: set[int] = set()
+        attempted_legacy_protocols: set[int] = set()
         
         # statuses that are definitive and should end probing
         definitive_statuses = {
@@ -659,6 +614,7 @@ class MinecraftProtocolClient:
                     version_name = next((name for proto, name in SUPPORTED_PROTOCOL_VERSIONS if proto == target_protocol), f"protocol {target_protocol}")
                     self.logger.info(f"Using known server version {server_version} -> protocol {target_protocol}")
                     versions_tried.append(f"{target_protocol} ({version_name}) [from server version]")
+                    attempted_protocols.add(target_protocol)
                     
                     result = self.check_whitelist(host, port, username, uuid_str, access_token, timeout)
                     
@@ -670,8 +626,58 @@ class MinecraftProtocolClient:
                         result['used_known_version'] = True
                         return result
                     
-                    # If not definitive, continue to fallback
+                    # If not definitive, try server-provided version hint before generic fallback
                     last_error = result
+                    # 1.19.x adaptive login start: if same-version mismatch or decoder exception, retry once with legacy name-only
+                    try:
+                        current_proto = target_protocol
+                        msg = (result.get('message') or '').lower()
+                        same_version_mismatch = (result.get('status') == 'version_mismatch' and result.get('hint_protocol') == current_proto)
+                        decoder_or_outdated = ('decoderexception' in msg) or ('outdated_client' in msg)
+                        if 759 <= current_proto <= 762 and (same_version_mismatch or decoder_or_outdated) and current_proto not in attempted_legacy_protocols:
+                            self._force_legacy_login_start = True
+                            self.logger.info("Retrying with legacy Login Start (name-only) for 1.19.x")
+                            versions_tried.append(f"{current_proto} ({version_name}) [legacy login start]")
+                            attempted_legacy_protocols.add(current_proto)
+                            result_legacy = self.check_whitelist(host, port, username, uuid_str, access_token, timeout)
+                            self._force_legacy_login_start = False
+                            if result_legacy.get('status') in definitive_statuses:
+                                result_legacy['protocol_version'] = current_proto
+                                result_legacy['version_name'] = version_name
+                                result_legacy['versions_tried'] = versions_tried
+                                result_legacy['used_known_version'] = True
+                                return result_legacy
+                            last_error = result_legacy
+                    except Exception:
+                        self._force_legacy_login_start = False
+                    # If server hints a protocol we've already used, stop probing
+                    if result.get('status') == 'version_mismatch':
+                        _hp = result.get('hint_protocol')
+                        if isinstance(_hp, int) and _hp in attempted_protocols:
+                            result['protocol_version'] = target_protocol
+                            result['version_name'] = version_name
+                            result['versions_tried'] = versions_tried
+                            result['used_known_version'] = True
+                            return result
+                    try:
+                        _hint_proto = result.get('hint_protocol')
+                        _hint_ver = result.get('hint_version')
+                        if isinstance(_hint_proto, int) and _hint_proto not in attempted_protocols:
+                            self.protocol_version = _hint_proto
+                            version_name = next((name for proto, name in SUPPORTED_PROTOCOL_VERSIONS if proto == _hint_proto), f"protocol {_hint_proto}")
+                            self.logger.info(f"Retrying using server-provided version hint {_hint_ver} -> protocol {_hint_proto}")
+                            versions_tried.append(f"{_hint_proto} ({version_name}) [from hint]")
+                            attempted_protocols.add(_hint_proto)
+                            result2 = self.check_whitelist(host, port, username, uuid_str, access_token, timeout)
+                            if result2.get('status') in definitive_statuses:
+                                result2['protocol_version'] = _hint_proto
+                                result2['version_name'] = version_name
+                                result2['versions_tried'] = versions_tried
+                                result2['used_known_version'] = True
+                                return result2
+                            last_error = result2
+                    except Exception:
+                        pass
                     self.logger.warning(f"Known version {server_version} protocol {target_protocol} not definitive ({result.get('status')}), trying fallback")
                     
                 except Exception as e:
@@ -687,11 +693,14 @@ class MinecraftProtocolClient:
             # Skip the version we already tried
             if server_version and protocol_version == get_protocol_from_version(server_version):
                 continue
+            if protocol_version in attempted_protocols:
+                continue
                 
             try:
                 self.protocol_version = protocol_version
                 self.logger.debug(f"Attempting whitelist check with protocol {protocol_version} ({version_name})")
                 versions_tried.append(f"{protocol_version} ({version_name})")
+                attempted_protocols.add(protocol_version)
                 
                 result = self.check_whitelist(host, port, username, uuid_str, access_token, timeout)
                 
@@ -703,8 +712,56 @@ class MinecraftProtocolClient:
                     result['used_known_version'] = False
                     return result
                 
-                # Otherwise, keep trying next protocol
+                # Otherwise, try server-provided hint before trying next protocol
                 last_error = result
+                # 1.19.x adaptive login start: if same-version mismatch or decoder exception, retry once with legacy name-only
+                try:
+                    current_proto = protocol_version
+                    msg = (result.get('message') or '').lower()
+                    same_version_mismatch = (result.get('status') == 'version_mismatch' and result.get('hint_protocol') == current_proto)
+                    decoder_or_outdated = ('decoderexception' in msg) or ('outdated_client' in msg)
+                    if 759 <= current_proto <= 762 and (same_version_mismatch or decoder_or_outdated) and current_proto not in attempted_legacy_protocols:
+                        self._force_legacy_login_start = True
+                        self.logger.info("Retrying with legacy Login Start (name-only) for 1.19.x")
+                        versions_tried.append(f"{current_proto} ({version_name}) [legacy login start]")
+                        attempted_legacy_protocols.add(current_proto)
+                        result_legacy = self.check_whitelist(host, port, username, uuid_str, access_token, timeout)
+                        self._force_legacy_login_start = False
+                        if result_legacy.get('status') in definitive_statuses:
+                            result_legacy['protocol_version'] = current_proto
+                            result_legacy['version_name'] = version_name
+                            result_legacy['versions_tried'] = versions_tried
+                            result_legacy['used_known_version'] = False
+                            return result_legacy
+                        last_error = result_legacy
+                except Exception:
+                    self._force_legacy_login_start = False
+                # If server hints a protocol we've already used, stop probing to avoid thrashing
+                if result.get('status') == 'version_mismatch':
+                    _hp = result.get('hint_protocol')
+                    if isinstance(_hp, int) and _hp in attempted_protocols:
+                        result['versions_tried'] = versions_tried
+                        result['used_known_version'] = bool(server_version and get_protocol_from_version(server_version))
+                        return result
+                try:
+                    _hint_proto = result.get('hint_protocol')
+                    _hint_ver = result.get('hint_version')
+                    if isinstance(_hint_proto, int) and _hint_proto not in attempted_protocols:
+                        self.protocol_version = _hint_proto
+                        vname2 = next((name for proto, name in SUPPORTED_PROTOCOL_VERSIONS if proto == _hint_proto), f"protocol {_hint_proto}")
+                        self.logger.info(f"Retrying using server-provided version hint {_hint_ver} -> protocol {_hint_proto}")
+                        versions_tried.append(f"{_hint_proto} ({vname2}) [from hint]")
+                        attempted_protocols.add(_hint_proto)
+                        result2 = self.check_whitelist(host, port, username, uuid_str, access_token, timeout)
+                        if result2.get('status') in definitive_statuses:
+                            result2['protocol_version'] = _hint_proto
+                            result2['version_name'] = vname2
+                            result2['versions_tried'] = versions_tried
+                            result2['used_known_version'] = False
+                            return result2
+                        last_error = result2
+                except Exception:
+                    pass
                 continue
                     
             except Exception as e:
@@ -902,9 +959,37 @@ class MinecraftProtocolClient:
                 'message': f'Server full: {reason}'
             }
         if 'multiplayer.disconnect.incompatible' in reason_lower or 'outdated' in reason_lower:
+            # Provide a protocol hint if the server includes a version string
+            try:
+                import re
+                m = re.search(r'(\d+\.\d+(?:\.\d+)?)', reason)
+                if m:
+                    hint_ver = m.group(1)
+                    proto = get_protocol_from_version(hint_ver)
+                    if proto:
+                        return {
+                            'status': 'version_mismatch',
+                            'message': f'Version mismatch: server indicates {hint_ver}',
+                            'hint_version': hint_ver,
+                            'hint_protocol': proto
+                        }
+            except Exception:
+                pass
             return {
                 'status': 'version_mismatch',
                 'message': f'Version mismatch: {reason}'
+            }
+        
+        # Handshake/proxy/mod-related failures that are not simple version mismatches
+        if 'handshake failure' in reason_lower or 'incompatible client' in reason_lower:
+            return {
+                'status': 'modded_required',
+                'message': reason
+            }
+        if 'badly compressed packet' in reason_lower:
+            return {
+                'status': 'error',
+                'message': reason
             }
         
         # Common whitelist messages
@@ -931,6 +1016,13 @@ class MinecraftProtocolClient:
                 'status': 'modded_required',
                 'message': reason
             }
+
+        # Velocity proxy required
+        if 'velocity' in reason_lower or 'requires you to connect with velocity' in reason_lower:
+            return {
+                'status': 'velocity_required',
+                'message': 'Proxy required (Velocity): ' + reason
+            }
         
         # Other common rejection reasons
         if 'server starting' in reason_lower or 'please reconnect' in reason_lower:
@@ -949,6 +1041,22 @@ class MinecraftProtocolClient:
                 'message': f'Server full: {reason}'
             }
         if any(term in reason_lower for term in ['version', 'protocol']):
+            # Provide a protocol hint if detectable
+            try:
+                import re
+                m = re.search(r'(\d+\.\d+(?:\.\d+)?)', reason)
+                if m:
+                    hint_ver = m.group(1)
+                    proto = get_protocol_from_version(hint_ver)
+                    if proto:
+                        return {
+                            'status': 'version_mismatch',
+                            'message': f'Version mismatch: server indicates {hint_ver}',
+                            'hint_version': hint_ver,
+                            'hint_protocol': proto
+                        }
+            except Exception:
+                pass
             return {
                 'status': 'version_mismatch',
                 'message': f'Version mismatch: {reason}'
@@ -958,5 +1066,4 @@ class MinecraftProtocolClient:
         return {
             'status': 'unknown_disconnect',
             'message': f'Disconnected: {reason}'
-        }
-
+        } 
